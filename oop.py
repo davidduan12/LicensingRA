@@ -169,7 +169,6 @@ class TenKFormHandler(BaseFormHandler):
     def process_filing(cls, name: str, cik: str, acc_number: str, date: str):
         self = cls(name=name, cik=cik)
         logger.info(f"Processing 10-K filing {acc_number} for {self.company_name}")
-
         index_url = self.get_index_url(acc_number)
         soup = self.fetch_page(index_url)
         if not soup:
@@ -193,7 +192,6 @@ class TenKFormHandler(BaseFormHandler):
         doc_soup = self.fetch_page(full_doc_url)
         if not doc_soup:
             return
-        print(full_doc_url)
         # Process exhibits
         logger.info(f'Starting process exhibits for {acc_number}')
         self.process_exhibits(doc_soup, accession_folder, soup)
@@ -214,7 +212,7 @@ class TenKFormHandler(BaseFormHandler):
         if not key:
             key = doc_soup.find_all(string=lambda t: t and 'ITEM 15' in self.normalize_text_caps(t))
         if not key:
-            logger.warning("No 'Part IV' section found in the document.")
+            logger.warning("No corresponding section found in the document.")
             return
 
         last_section = key[-1]
@@ -272,7 +270,6 @@ class TenKFormHandler(BaseFormHandler):
                 with open(os.path.join(accession_folder, "extras.txt"), "a", encoding='utf-8') as f:
                     print("exhibit:", exhibit)
                     f.write(exhibit + ":" + self.normalize_text(description.text) + "\n")
-                    logger.info(f'Wrote to extras.txt')
                 f.close()
 
 
@@ -324,7 +321,9 @@ class TenQFormHandler(BaseFormHandler):
     def process_exhibits(self, doc_soup, accession_folder: str):
         key = doc_soup.find_all(string=lambda t: t and 'item 6' in self.normalize_text(t))
         if not key:
-            logger.warning("No 'Part IV' section found in the document.")
+            key = doc_soup.find_all(string=lambda t: t and 'part ii' in self.normalize_text(t))
+        if not key:
+            logger.warning("No corresponding sections found in the document.")
             return
 
         last_section = key[-1]
@@ -337,24 +336,28 @@ class TenQFormHandler(BaseFormHandler):
                     cells = row.find_all('td')
                     if len(cells) > 1:
                         exhibit_number = cells[0].get_text(strip=True)
-                        if any(self.has_keyword(cell, KEYWORDS) for cell in cells[1:]):
+                        contain = [self.has_keyword(self, cell, KEYWORDS) for cell in cells[1:]]
+                        if any(contain):
                             exhibit_number = self.clean_exhibit_number(exhibit_number)
                             logger.info(f"Found exhibit: {exhibit_number}")
                             link_tag = cells[0].find('a', href=True)
+                            if not link_tag:
+                                link_tag = cells[contain.index(True) + 1].find('a', href=True)
                             if link_tag and 'sec.gov' in link_tag['href']:
                                 filing_url = link_tag['href']
                                 save_path = os.path.join(accession_folder, f"{exhibit_number}.html")
                                 self.download_file(filing_url, accession_folder, save_path)
                             else:
-                                exhibits.append(exhibit_number)
+                                c = cells[1:]
+                                exhibits.append((exhibit_number, c[contain.index(True)]))
         # Handle exhibits without direct links
         if exhibits:
             self.download_missing_exhibits(doc_soup, exhibits, accession_folder)
 
-    def download_missing_exhibits(self, doc_soup, exhibits: list[str], accession_folder: str):
+    def download_missing_exhibits(self, doc_soup, exhibits: list[tuple], accession_folder: str):
         table = doc_soup.find('table', {'summary': 'Document Format Files'})
         rows = table.find_all('tr')
-        for exhibit in exhibits:
+        for exhibit, description in exhibits:
             for row in rows:
                 tds = row.find_all('td')
                 if len(tds) >= 4 and 'EX-' in tds[3].text:
@@ -367,6 +370,10 @@ class TenQFormHandler(BaseFormHandler):
                             print(f"Downloading file for {tds[3].text} from {document_link}")
                             logger.info(f"Downloading exhibit {exhibit} to {path} from {document_link}")
                             self.download_file(document_link, accession_folder, path)
+                            exhibits.remove((exhibit, description))
+                            break
+                        else:
+                            logger.warning(f"Link tag not found for {tds[3].text}")
 
 class EightKFormHandler(BaseFormHandler):
     @classmethod
@@ -396,10 +403,9 @@ class EightKFormHandler(BaseFormHandler):
         doc_soup = self.fetch_page(full_doc_url)
         if not doc_soup:
             return
-        print(full_doc_url)
         # Process exhibits
         logger.info(f'Starting process exhibits for {acc_number}')
-        self.process_exhibits(doc_soup, accession_folder)
+        self.process_exhibits(doc_soup, accession_folder, soup)
 
     def get_index_url(self, accession_number: str) -> str:
         accession_number_nodashes = accession_number.replace('-', '')
@@ -412,7 +418,7 @@ class EightKFormHandler(BaseFormHandler):
         accession_folder = os.path.join(form_folder, accession_number)
         return accession_folder
 
-    def process_exhibits(self, doc_soup, accession_folder: str):
+    def process_exhibits(self, doc_soup, accession_folder: str, soup):
         key = doc_soup.find_all(string=lambda t: t and 'item 9.01' in self.normalize_text(t))
         if not key:
             logger.warning("No 'item 9.01' section found in the document.")
@@ -428,24 +434,29 @@ class EightKFormHandler(BaseFormHandler):
                     cells = row.find_all('td')
                     if len(cells) > 1:
                         exhibit_number = cells[0].get_text(strip=True)
-                        if any(self.has_keyword(cell, KEYWORDS) for cell in cells[1:]):
+                        contain = [self.has_keyword(self, cell, KEYWORDS) for cell in cells[1:]]
+                        if any(contain):
                             exhibit_number = self.clean_exhibit_number(exhibit_number)
                             logger.info(f"Found exhibit: {exhibit_number}")
                             link_tag = cells[0].find('a', href=True)
+                            if not link_tag:
+                                link_tag = cells[contain.index(True) + 1].find('a', href=True)
                             if link_tag and 'sec.gov' in link_tag['href']:
                                 filing_url = link_tag['href']
                                 save_path = os.path.join(accession_folder, f"{exhibit_number}.html")
                                 self.download_file(filing_url, accession_folder, save_path)
                             else:
-                                exhibits.append(exhibit_number)
+                                c = cells[1:]
+                                exhibits.append((exhibit_number, c[contain.index(True)]))
+        logger.info(exhibits)
         # Handle exhibits without direct links
         if exhibits:
-            self.download_missing_exhibits(doc_soup, exhibits, accession_folder)
+            self.download_missing_exhibits(soup, exhibits, accession_folder)
 
-    def download_missing_exhibits(self, doc_soup, exhibits: list[str], accession_folder: str):
+    def download_missing_exhibits(self, doc_soup, exhibits: list[tuple], accession_folder: str):
         table = doc_soup.find('table', {'summary': 'Document Format Files'})
         rows = table.find_all('tr')
-        for exhibit in exhibits:
+        for exhibit, description in exhibits:
             for row in rows:
                 tds = row.find_all('td')
                 if len(tds) >= 4 and 'EX-' in tds[3].text:
@@ -454,10 +465,21 @@ class EightKFormHandler(BaseFormHandler):
                         link_tag = tds[2].find('a', href=True)
                         if link_tag:
                             document_link = self.get_full_url(link_tag['href'])
-                            path = os.path.join(accession_folder, f"{tds[3].text}.html")
+                            path = os.path.join(accession_folder, f"{tds[3].text[3:]}.html")
                             print(f"Downloading file for {tds[3].text} from {document_link}")
                             logger.info(f"Downloading exhibit {exhibit} to {path} from {document_link}")
                             self.download_file(document_link, accession_folder, path)
+                            exhibits.remove((exhibit, description))
+                            break
+                        else:
+                            logger.warning(f"Link tag not found for {tds[3].text}")
+        if exhibits:
+            for exhibit, description in exhibits:
+                os.makedirs(accession_folder, exist_ok=True)
+                with open(os.path.join(accession_folder, "extras.txt"), "a", encoding='utf-8') as f:
+                    print("exhibit:", exhibit)
+                    f.write(exhibit + ":" + self.normalize_text(description.text) + "\n")
+                f.close()
 # Factory class to get the appropriate form handler
 class FormHandlerFactory:
     @staticmethod
